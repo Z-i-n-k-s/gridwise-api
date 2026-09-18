@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 
 import { OptimizeEnergyRequestDto } from '../dto/optimize-energy-request.dto.js';
 import { GroqClientService } from './groq-client.service.js';
@@ -29,6 +33,9 @@ interface GroqDirectiveResponse {
 
 @Injectable()
 export class DirectiveInterpreterService {
+  private readonly logger =
+    new Logger(DirectiveInterpreterService.name);
+
   constructor(
     private readonly groqClientService: GroqClientService,
   ) {}
@@ -36,20 +43,27 @@ export class DirectiveInterpreterService {
   async interpret(
     request: OptimizeEnergyRequestDto,
   ): Promise<InterpretedDirective[]> {
-    const client = this.groqClientService.getClient();
-    const model = this.groqClientService.getModel();
+    try {
+      const client =
+        this.groqClientService.getClient();
 
-    const response = await client.chat.completions.create({
-      model,
-      temperature: 0,
-      reasoning_effort: 'low',
+      const model =
+        this.groqClientService.getModel();
 
-      messages: [
-        {
-          role: 'system',
-          content: `
-You interpret natural-language operator notes for a 24-hour
-campus energy optimization system.
+      const response =
+        await client.chat.completions.create({
+          model,
+
+          temperature: 0,
+          reasoning_effort: 'low',
+          include_reasoning: false,
+          max_completion_tokens: 700,
+
+          messages: [
+            {
+              role: 'system',
+              content: `
+You interpret natural-language operator notes for a 24-hour campus energy optimization system.
 
 Return exactly one directive for every operator note.
 
@@ -120,7 +134,7 @@ RULES
 - Supported directive -> applies = true.
 - no_op -> applies = false.
 - no_op -> structured_adjustment = null.
-- For other directives structured_adjustment must not be null.
+- Other directives must have structured_adjustment.
 - Hours must be integers from 0 through 23.
 - Hours must be unique and ascending.
 - Time ranges are start-inclusive and end-exclusive.
@@ -138,164 +152,217 @@ For structured_adjustment:
 - max_grid_kwh is only used by max_grid_window.
 - Fields not relevant to the directive must be null.
 
-Understand natural-language paraphrases.
+Understand paraphrases.
 Do not invent unsupported directives.
-Do not modify demand, tariff, battery capacity,
-or other scenario values.
 
 Keep explanation short.
-          `.trim(),
-        },
+              `.trim(),
+            },
 
-        {
-          role: 'user',
-          content: JSON.stringify({
-            scenario_id: request.scenario_id,
-            operator_notes: request.operator_notes,
-            battery: request.battery,
-            hours: request.hours,
-          }),
-        },
-      ],
+            {
+              role: 'user',
+              content: JSON.stringify({
+                operator_notes:
+                  request.operator_notes,
 
-      response_format: {
-        type: 'json_schema',
+                battery: {
+                  capacity_kwh:
+                    request.battery.capacity_kwh,
+                },
+              }),
+            },
+          ],
 
-        json_schema: {
-          name: 'gridwise_directives',
-          strict: true,
+          response_format: {
+            type: 'json_schema',
 
-          schema: {
-            type: 'object',
-            additionalProperties: false,
+            json_schema: {
+              name: 'gridwise_directives',
+              strict: true,
 
-            properties: {
-              directives: {
-                type: 'array',
+              schema: {
+                type: 'object',
+                additionalProperties: false,
 
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
+                properties: {
+                  directives: {
+                    type: 'array',
 
-                  properties: {
-                    note_index: {
-                      type: 'integer',
-                      minimum: 0,
-                      maximum: 2,
-                    },
-
-                    applies: {
-                      type: 'boolean',
-                    },
-
-                    directive_type: {
-                      type: 'string',
-                      enum: [
-                        'solar_reduction',
-                        'minimum_battery_reserve',
-                        'no_charge_window',
-                        'no_discharge_window',
-                        'max_grid_window',
-                        'no_op',
-                      ],
-                    },
-
-                    structured_adjustment: {
-                      type: ['object', 'null'],
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
 
                       properties: {
-                        hours: {
-                          type: 'array',
-                          items: {
-                            type: 'integer',
-                            minimum: 0,
-                            maximum: 23,
+                        note_index: {
+                          type: 'integer',
+                          minimum: 0,
+                          maximum: 2,
+                        },
+
+                        applies: {
+                          type: 'boolean',
+                        },
+
+                        directive_type: {
+                          type: 'string',
+                          enum: [
+                            'solar_reduction',
+                            'minimum_battery_reserve',
+                            'no_charge_window',
+                            'no_discharge_window',
+                            'max_grid_window',
+                            'no_op',
+                          ],
+                        },
+
+                        structured_adjustment: {
+                          type: [
+                            'object',
+                            'null',
+                          ],
+
+                          properties: {
+                            hours: {
+                              type: 'array',
+
+                              items: {
+                                type: 'integer',
+                                minimum: 0,
+                                maximum: 23,
+                              },
+                            },
+
+                            factor: {
+                              type: [
+                                'number',
+                                'null',
+                              ],
+                            },
+
+                            minimum_energy_kwh: {
+                              type: [
+                                'number',
+                                'null',
+                              ],
+                            },
+
+                            max_grid_kwh: {
+                              type: [
+                                'number',
+                                'null',
+                              ],
+                            },
                           },
+
+                          required: [
+                            'hours',
+                            'factor',
+                            'minimum_energy_kwh',
+                            'max_grid_kwh',
+                          ],
+
+                          additionalProperties:
+                            false,
                         },
 
-                        factor: {
-                          type: ['number', 'null'],
-                        },
-
-                        minimum_energy_kwh: {
-                          type: ['number', 'null'],
-                        },
-
-                        max_grid_kwh: {
-                          type: ['number', 'null'],
+                        explanation: {
+                          type: 'string',
                         },
                       },
 
                       required: [
-                        'hours',
-                        'factor',
-                        'minimum_energy_kwh',
-                        'max_grid_kwh',
+                        'note_index',
+                        'applies',
+                        'directive_type',
+                        'structured_adjustment',
+                        'explanation',
                       ],
-
-                      additionalProperties: false,
-                    },
-
-                    explanation: {
-                      type: 'string',
                     },
                   },
-
-                  required: [
-                    'note_index',
-                    'applies',
-                    'directive_type',
-                    'structured_adjustment',
-                    'explanation',
-                  ],
                 },
+
+                required: [
+                  'directives',
+                ],
               },
             },
-
-            required: ['directives'],
           },
-        },
-      },
-    });
+        });
 
-    const content = response.choices[0]?.message?.content;
+      const content =
+        response.choices[0]
+          ?.message?.content;
 
-    if (!content) {
-      throw new Error('Groq returned an empty response');
-    }
+      if (!content) {
+        throw new Error(
+          'Groq returned an empty response',
+        );
+      }
 
-    const parsed = JSON.parse(
-      content,
-    ) as GroqDirectiveResponse;
+      const parsed = JSON.parse(
+        content,
+      ) as GroqDirectiveResponse;
 
-    if (
-      !Array.isArray(parsed.directives) ||
-      parsed.directives.length !== request.operator_notes.length
-    ) {
-      throw new Error(
-        'Groq returned an incorrect number of directives',
+      if (
+        !Array.isArray(
+          parsed.directives,
+        ) ||
+        parsed.directives.length !==
+          request.operator_notes.length
+      ) {
+        throw new Error(
+          'Groq returned an incorrect number of directives',
+        );
+      }
+
+      return parsed.directives.map(
+        (directive) =>
+          this.normalizeDirective(
+            directive,
+          ),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown Groq error';
+
+      this.logger.error(
+        `Directive interpretation failed: ${message}`,
+      );
+
+      throw new ServiceUnavailableException(
+        'Directive interpretation service is temporarily unavailable',
       );
     }
-
-    return parsed.directives.map((directive) =>
-      this.normalizeDirective(directive),
-    );
   }
 
   private normalizeDirective(
     directive: RawDirective,
   ): InterpretedDirective {
-    if (directive.directive_type === 'no_op') {
+    if (
+      directive.directive_type ===
+      'no_op'
+    ) {
       return {
-        note_index: directive.note_index,
+        note_index:
+          directive.note_index,
+
         applies: false,
-        directive_type: 'no_op',
-        structured_adjustment: null,
-        explanation: directive.explanation,
+
+        directive_type:
+          'no_op',
+
+        structured_adjustment:
+          null,
+
+        explanation:
+          directive.explanation,
       };
     }
 
-    const adjustment = directive.structured_adjustment;
+    const adjustment =
+      directive.structured_adjustment;
 
     if (!adjustment) {
       throw new Error(
@@ -303,84 +370,142 @@ Keep explanation short.
       );
     }
 
-    switch (directive.directive_type) {
+    switch (
+      directive.directive_type
+    ) {
       case 'solar_reduction': {
-        if (adjustment.factor === null) {
+        if (
+          adjustment.factor === null
+        ) {
           throw new Error(
             'Missing factor for solar_reduction',
           );
         }
 
         return {
-          note_index: directive.note_index,
+          note_index:
+            directive.note_index,
+
           applies: true,
-          directive_type: 'solar_reduction',
+
+          directive_type:
+            'solar_reduction',
+
           structured_adjustment: {
-            hours: adjustment.hours,
-            factor: adjustment.factor,
+            hours:
+              adjustment.hours,
+
+            factor:
+              adjustment.factor,
           },
-          explanation: directive.explanation,
+
+          explanation:
+            directive.explanation,
         };
       }
 
       case 'minimum_battery_reserve': {
-        if (adjustment.minimum_energy_kwh === null) {
+        if (
+          adjustment
+            .minimum_energy_kwh ===
+          null
+        ) {
           throw new Error(
             'Missing minimum_energy_kwh for minimum_battery_reserve',
           );
         }
 
         return {
-          note_index: directive.note_index,
+          note_index:
+            directive.note_index,
+
           applies: true,
-          directive_type: 'minimum_battery_reserve',
+
+          directive_type:
+            'minimum_battery_reserve',
+
           structured_adjustment: {
-            hours: adjustment.hours,
+            hours:
+              adjustment.hours,
+
             minimum_energy_kwh:
-              adjustment.minimum_energy_kwh,
+              adjustment
+                .minimum_energy_kwh,
           },
-          explanation: directive.explanation,
+
+          explanation:
+            directive.explanation,
         };
       }
 
       case 'no_charge_window':
         return {
-          note_index: directive.note_index,
+          note_index:
+            directive.note_index,
+
           applies: true,
-          directive_type: 'no_charge_window',
+
+          directive_type:
+            'no_charge_window',
+
           structured_adjustment: {
-            hours: adjustment.hours,
+            hours:
+              adjustment.hours,
           },
-          explanation: directive.explanation,
+
+          explanation:
+            directive.explanation,
         };
 
       case 'no_discharge_window':
         return {
-          note_index: directive.note_index,
+          note_index:
+            directive.note_index,
+
           applies: true,
-          directive_type: 'no_discharge_window',
+
+          directive_type:
+            'no_discharge_window',
+
           structured_adjustment: {
-            hours: adjustment.hours,
+            hours:
+              adjustment.hours,
           },
-          explanation: directive.explanation,
+
+          explanation:
+            directive.explanation,
         };
 
       case 'max_grid_window': {
-        if (adjustment.max_grid_kwh === null) {
+        if (
+          adjustment.max_grid_kwh ===
+          null
+        ) {
           throw new Error(
             'Missing max_grid_kwh for max_grid_window',
           );
         }
 
         return {
-          note_index: directive.note_index,
+          note_index:
+            directive.note_index,
+
           applies: true,
-          directive_type: 'max_grid_window',
+
+          directive_type:
+            'max_grid_window',
+
           structured_adjustment: {
-            hours: adjustment.hours,
-            max_grid_kwh: adjustment.max_grid_kwh,
+            hours:
+              adjustment.hours,
+
+            max_grid_kwh:
+              adjustment
+                .max_grid_kwh,
           },
-          explanation: directive.explanation,
+
+          explanation:
+            directive.explanation,
         };
       }
     }

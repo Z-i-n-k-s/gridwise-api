@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 
 import {
   OptimizeEnergyRequestDto,
@@ -7,6 +11,10 @@ import {
 import {
   OptimizeEnergyResponseDto,
 } from './dto/optimize-energy-response.dto.js';
+
+import {
+  InterpretedDirective,
+} from './interpreter/directive-interpreter.types.js';
 
 import {
   DirectiveInterpreterService,
@@ -38,6 +46,11 @@ import {
 
 @Injectable()
 export class OptimizeEnergyService {
+  private readonly logger =
+    new Logger(
+      OptimizeEnergyService.name,
+    );
+
   constructor(
     private readonly directiveInterpreterService:
       DirectiveInterpreterService,
@@ -54,60 +67,51 @@ export class OptimizeEnergyService {
     private readonly energyOptimizerService:
       EnergyOptimizerService,
 
-      private readonly planValidatorService:
-  PlanValidatorService,
+    private readonly planValidatorService:
+      PlanValidatorService,
 
-  private readonly planSummaryService:
-  PlanSummaryService,
-
+    private readonly planSummaryService:
+      PlanSummaryService,
   ) {}
 
   async optimize(
     request: OptimizeEnergyRequestDto,
   ): Promise<OptimizeEnergyResponseDto> {
-    // Step 1: validate request
-    this.requestValidatorService.validate(request);
+    this.requestValidatorService.validate(
+      request,
+    );
 
-    // Step 2: interpret operator notes
-    const interpretedDirectives =
-      await this.directiveInterpreterService.interpret(
-        request,
-      );
-
-    // Step 3: validate directives
     const directiveInterpretation =
-      this.directiveGuardrailService.validate(
+      await this.interpretWithRetry(
         request,
-        interpretedDirectives,
       );
 
-    // Step 4: build hourly constraints
     const hourlyConstraints =
       this.constraintBuilderService.build(
         request,
         directiveInterpretation,
       );
 
-    // Step 5: optimize energy schedule
     const optimization =
       await this.energyOptimizerService.optimize(
         request,
         hourlyConstraints,
       );
 
-      this.planValidatorService.validate(
-  request,
-  hourlyConstraints,
-  optimization,
-);
+    this.planValidatorService.validate(
+      request,
+      hourlyConstraints,
+      optimization,
+    );
 
-const planSummary =
-  this.planSummaryService.generate(
-    directiveInterpretation,
-  );
+    const planSummary =
+      this.planSummaryService.generate(
+        directiveInterpretation,
+      );
 
     return {
-      scenario_id: request.scenario_id,
+      scenario_id:
+        request.scenario_id,
 
       directive_interpretation:
         directiveInterpretation,
@@ -124,7 +128,74 @@ const planSummary =
       peak_grid_kwh:
         optimization.peak_grid_kwh,
 
-     plan_summary: planSummary,
+      plan_summary:
+        planSummary,
     };
+  }
+
+  private async interpretWithRetry(
+    request: OptimizeEnergyRequestDto,
+  ): Promise<InterpretedDirective[]> {
+    const maximumAttempts = 2;
+
+    for (
+      let attempt = 1;
+      attempt <= maximumAttempts;
+      attempt++
+    ) {
+      try {
+        const interpretedDirectives =
+          await this.directiveInterpreterService.interpret(
+            request,
+          );
+
+        return this.directiveGuardrailService.validate(
+          request,
+          interpretedDirectives,
+        );
+      } catch {
+        if (
+          attempt <
+          maximumAttempts
+        ) {
+          this.logger.warn(
+            'Directive interpretation failed; retrying once',
+          );
+
+          /*
+           * Short backoff helps with temporary
+           * provider throttling/network errors.
+           */
+          await this.delay(1000);
+
+          continue;
+        }
+
+        this.logger.error(
+          'Directive interpretation failed after retry',
+        );
+
+        throw new InternalServerErrorException(
+          'Directive interpretation failed',
+        );
+      }
+    }
+
+    throw new InternalServerErrorException(
+      'Directive interpretation failed',
+    );
+  }
+
+  private async delay(
+    milliseconds: number,
+  ): Promise<void> {
+    await new Promise<void>(
+      (resolve) => {
+        setTimeout(
+          resolve,
+          milliseconds,
+        );
+      },
+    );
   }
 }

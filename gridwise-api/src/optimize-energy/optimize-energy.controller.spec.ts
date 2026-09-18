@@ -1,18 +1,56 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { OptimizeEnergyController } from './optimize-energy.controller.js';
+import {
+  Test,
+  TestingModule,
+} from '@nestjs/testing';
 
-describe('OptimizeEnergyController', () => {
-  let controller: OptimizeEnergyController;
+import {
+  OptimizeEnergyController,
+} from './optimize-energy.controller.js';
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      controllers: [OptimizeEnergyController],
-    }).compile();
+import {
+  OptimizeEnergyService,
+} from './optimize-energy.service.js';
 
-    controller = module.get<OptimizeEnergyController>(OptimizeEnergyController);
-  });
+describe(
+  'OptimizeEnergyController',
+  () => {
+    let controller:
+      OptimizeEnergyController;
 
-  it('should be defined', () => {
-    expect(controller).toBeDefined();
-  });
-});
+    beforeEach(async () => {
+      const module:
+        TestingModule =
+        await Test.createTestingModule({
+          controllers: [
+            OptimizeEnergyController,
+          ],
+
+          providers: [
+            {
+              provide:
+                OptimizeEnergyService,
+
+              useValue: {
+                optimize:
+                  vi.fn(),
+              },
+            },
+          ],
+        }).compile();
+
+      controller =
+        module.get<OptimizeEnergyController>(
+          OptimizeEnergyController,
+        );
+    });
+
+    it(
+      'should be defined',
+      () => {
+        expect(
+          controller,
+        ).toBeDefined();
+      },
+    );
+  },
+);

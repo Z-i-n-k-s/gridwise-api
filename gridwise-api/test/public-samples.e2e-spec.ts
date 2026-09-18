@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { INestApplication } from '@nestjs/common';
+import {
+  INestApplication,
+  ValidationPipe,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import request from 'supertest';
@@ -16,6 +19,7 @@ interface SampleCase {
     scenario_id: string;
     operator_notes: string[];
     hours: unknown[];
+
     battery: {
       initial_energy_kwh: number;
     };
@@ -38,142 +42,177 @@ interface SampleFile {
   cases: SampleCase[];
 }
 
-describe.sequential('Public sample cases (e2e)', () => {
-  let app: INestApplication<App>;
-  let samples: SampleCase[];
+describe.sequential(
+  'Public sample cases (e2e)',
+  () => {
+    let app: INestApplication<App>;
+    let samples: SampleCase[];
 
-  beforeAll(async () => {
-    const moduleFixture: TestingModule =
-      await Test.createTestingModule({
-        imports: [AppModule],
-      }).compile();
+    beforeAll(async () => {
+      const moduleFixture: TestingModule =
+        await Test.createTestingModule({
+          imports: [AppModule],
+        }).compile();
 
-    app = moduleFixture.createNestApplication();
+      app =
+        moduleFixture.createNestApplication();
 
-    await app.init();
+      app.useGlobalPipes(
+        new ValidationPipe({
+          whitelist: true,
+          transform: true,
+        }),
+      );
 
-    const filePath = resolve(
-      process.cwd(),
-      'BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json',
-    );
+      await app.init();
 
-    const file = JSON.parse(
-      readFileSync(filePath, 'utf-8'),
-    ) as SampleFile;
+      const filePath = resolve(
+        process.cwd(),
+        'BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json',
+      );
 
-    samples = file.cases;
-  });
+      const file = JSON.parse(
+        readFileSync(
+          filePath,
+          'utf-8',
+        ),
+      ) as SampleFile;
 
-  afterAll(async () => {
-    await app.close();
-  });
+      samples = file.cases;
+    });
 
-  for (let i = 1; i <= 10; i++) {
-    const sampleId =
-      `SAMPLE-${String(i).padStart(2, '0')}`;
+    afterAll(async () => {
+      await app.close();
+    });
 
-    it(
-      `${sampleId} should interpret directives and reach optimal cost`,
-      async () => {
-        const sample = samples.find(
-          (item) => item.id === sampleId,
-        );
+    for (let i = 1; i <= 10; i++) {
+      const sampleId =
+        `SAMPLE-${String(i).padStart(2, '0')}`;
 
-        expect(sample).toBeDefined();
-
-        if (!sample) {
-          throw new Error(
-            `Missing ${sampleId}`,
-          );
-        }
-
-        const response = await request(
-          app.getHttpServer(),
-        )
-          .post('/optimize-energy')
-          .send(sample.input)
-          .expect(201);
-
-        expect(
-          response.body.scenario_id,
-        ).toBe(sample.input.scenario_id);
-
-        expect(
-          response.body.directive_interpretation,
-        ).toHaveLength(
-          sample.expected_output
-            .directive_interpretation.length,
-        );
-
-        for (
-          let index = 0;
-          index <
-          sample.expected_output
-            .directive_interpretation.length;
-          index++
-        ) {
-          const actual =
-            response.body
-              .directive_interpretation[index];
-
-          const expected =
-            sample.expected_output
-              .directive_interpretation[index];
-
-          expect(actual.note_index).toBe(
-            expected.note_index,
-          );
-
-          expect(actual.applies).toBe(
-            expected.applies,
-          );
+      it(
+        `${sampleId} should interpret directives and reach optimal cost`,
+        async () => {
+          const sample =
+            samples.find(
+              (item) =>
+                item.id === sampleId,
+            );
 
           expect(
-            actual.directive_type,
+            sample,
+          ).toBeDefined();
+
+          if (!sample) {
+            throw new Error(
+              `Missing ${sampleId}`,
+            );
+          }
+
+          const response =
+            await request(
+              app.getHttpServer(),
+            )
+              .post(
+                '/optimize-energy',
+              )
+              .send(sample.input)
+              .expect(200);
+
+          expect(
+            response.body.scenario_id,
           ).toBe(
-            expected.directive_type,
+            sample.input.scenario_id,
           );
 
           expect(
-            actual.structured_adjustment,
-          ).toEqual(
-            expected.structured_adjustment,
+            response.body
+              .directive_interpretation,
+          ).toHaveLength(
+            sample.expected_output
+              .directive_interpretation
+              .length,
           );
-        }
 
-        expect(
-          response.body.hourly_plan,
-        ).toHaveLength(24);
+          for (
+            let index = 0;
+            index <
+            sample.expected_output
+              .directive_interpretation
+              .length;
+            index++
+          ) {
+            const actual =
+              response.body
+                .directive_interpretation[
+                index
+              ];
 
-        expect(
-          response.body.total_grid_kwh,
-        ).toBeCloseTo(
-          sample.expected_output
-            .total_grid_kwh,
-          2,
-        );
+            const expected =
+              sample.expected_output
+                .directive_interpretation[
+                index
+              ];
 
-        expect(
-          response.body.total_cost_bdt,
-        ).toBeCloseTo(
-          sample.expected_output
-            .total_cost_bdt,
-          2,
-        );
+            expect(
+              actual.note_index,
+            ).toBe(
+              expected.note_index,
+            );
 
-        const finalHour =
-          response.body.hourly_plan[23];
+            expect(
+              actual.applies,
+            ).toBe(
+              expected.applies,
+            );
 
-        expect(
-          finalHour
-            .battery_energy_after_kwh,
-        ).toBeCloseTo(
-          sample.input.battery
-            .initial_energy_kwh,
-          2,
-        );
-      },
-      30000,
-    );
-  }
-});
+            expect(
+              actual.directive_type,
+            ).toBe(
+              expected.directive_type,
+            );
+
+            expect(
+              actual.structured_adjustment,
+            ).toEqual(
+              expected.structured_adjustment,
+            );
+          }
+
+          expect(
+            response.body.hourly_plan,
+          ).toHaveLength(24);
+
+          expect(
+            response.body.total_grid_kwh,
+          ).toBeCloseTo(
+            sample.expected_output
+              .total_grid_kwh,
+            2,
+          );
+
+          expect(
+            response.body.total_cost_bdt,
+          ).toBeCloseTo(
+            sample.expected_output
+              .total_cost_bdt,
+            2,
+          );
+
+          const finalHour =
+            response.body
+              .hourly_plan[23];
+
+          expect(
+            finalHour
+              .battery_energy_after_kwh,
+          ).toBeCloseTo(
+            sample.input.battery
+              .initial_energy_kwh,
+            2,
+          );
+        },
+        30000,
+      );
+    }
+  },
+);

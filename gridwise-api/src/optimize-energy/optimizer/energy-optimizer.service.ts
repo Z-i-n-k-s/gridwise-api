@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 
 import {
   OptimizeEnergyRequestDto,
@@ -37,56 +41,119 @@ export interface EnergyOptimizerResult {
 
 @Injectable()
 export class EnergyOptimizerService {
+  private readonly logger =
+    new Logger(
+      EnergyOptimizerService.name,
+    );
+
   private readonly highsPromise =
     this.loadHighs();
 
   private async loadHighs(): Promise<HighsInstance> {
-    const highsModule = await import('highs');
+    try {
+      const highsModule =
+        await import('highs');
 
-    const loadHighs = highsModule.default as unknown as
-      () => Promise<HighsInstance>;
+      const loadHighs =
+        highsModule.default as unknown as
+          () => Promise<HighsInstance>;
 
-    return loadHighs();
+      return await loadHighs();
+    } catch {
+      this.logger.error(
+        'Optimization engine failed to initialize',
+      );
+
+      throw new InternalServerErrorException(
+        'Energy optimization failed',
+      );
+    }
   }
 
   async optimize(
     request: OptimizeEnergyRequestDto,
     constraints: HourConstraint[],
   ): Promise<EnergyOptimizerResult> {
-    const highs = await this.highsPromise;
+    try {
+      return await this.solve(
+        request,
+        constraints,
+      );
+    } catch (error) {
+      if (
+        error instanceof
+        InternalServerErrorException
+      ) {
+        throw error;
+      }
 
-    const hoursByNumber = new Map(
-      request.hours.map((item) => [
-        item.hour,
-        item,
-      ]),
-    );
+      this.logger.error(
+        'Energy optimization failed',
+      );
 
-    const objective = request.hours
-      .map(
-        (hour) =>
-          `${hour.tariff_bdt_per_kwh} g${hour.hour}`,
-      )
-      .join(' + ');
+      throw new InternalServerErrorException(
+        'Energy optimization failed',
+      );
+    }
+  }
 
-    const equations: string[] = [];
+  private async solve(
+    request: OptimizeEnergyRequestDto,
+    constraints: HourConstraint[],
+  ): Promise<EnergyOptimizerResult> {
+    const highs =
+      await this.highsPromise;
 
-    for (let h = 0; h < 24; h++) {
-      const hour = hoursByNumber.get(h);
+    const hoursByNumber =
+      new Map(
+        request.hours.map(
+          (hour) => [
+            hour.hour,
+            hour,
+          ],
+        ),
+      );
+
+    const objective =
+      request.hours
+        .map(
+          (hour) =>
+            `${hour.tariff_bdt_per_kwh} g${hour.hour}`,
+        )
+        .join(' + ');
+
+    const equations: string[] =
+      [];
+
+    for (
+      let h = 0;
+      h < 24;
+      h++
+    ) {
+      const hour =
+        hoursByNumber.get(h);
 
       if (!hour) {
         throw new Error(
-          `Missing hour ${h}`,
+          'Missing hourly input',
         );
       }
 
-      // Energy balance:
-      // grid + solar - battery_move = demand
+      /*
+       * Energy balance:
+       *
+       * grid + solar - battery_move = demand
+       *
+       * battery_move > 0 = charging
+       * battery_move < 0 = discharging
+       */
       equations.push(
         `balance_${h}: g${h} + s${h} - b${h} = ${hour.demand_kwh}`,
       );
 
-      // Battery state transition
+      /*
+       * Battery energy transition.
+       */
       if (h === 0) {
         equations.push(
           `battery_${h}: e${h} - b${h} = ${request.battery.initial_energy_kwh}`,
@@ -98,25 +165,44 @@ export class EnergyOptimizerService {
       }
     }
 
-    // Final battery energy must equal initial energy
+    /*
+     * Final battery state must equal
+     * the starting battery state.
+     */
     equations.push(
       `final_battery: e23 = ${request.battery.initial_energy_kwh}`,
     );
 
-    const bounds: string[] = [];
+    const bounds: string[] =
+      [];
 
-    for (let h = 0; h < 24; h++) {
-      const hour = hoursByNumber.get(h);
-      const constraint = constraints[h];
+    for (
+      let h = 0;
+      h < 24;
+      h++
+    ) {
+      const hour =
+        hoursByNumber.get(h);
 
-      if (!hour || !constraint) {
+      const constraint =
+        constraints[h];
+
+      if (
+        !hour ||
+        !constraint
+      ) {
         throw new Error(
-          `Missing data or constraint for hour ${h}`,
+          'Missing optimization data',
         );
       }
 
-      // Grid bounds
-      if (constraint.max_grid_kwh === null) {
+      /*
+       * Grid import bounds.
+       */
+      if (
+        constraint.max_grid_kwh ===
+        null
+      ) {
         bounds.push(
           `g${h} >= 0`,
         );
@@ -126,7 +212,10 @@ export class EnergyOptimizerService {
         );
       }
 
-      // Effective solar after directives
+      /*
+       * Effective solar after
+       * directive reductions.
+       */
       const availableSolar =
         hour.solar_kwh *
         constraint.solar_factor;
@@ -135,9 +224,12 @@ export class EnergyOptimizerService {
         `0 <= s${h} <= ${availableSolar}`,
       );
 
-      // Battery movement:
-      // positive = charging
-      // negative = discharging
+      /*
+       * Signed battery movement:
+       *
+       * positive = charge
+       * negative = discharge
+       */
       let minimumBatteryMove =
         -request.battery
           .max_discharge_kwh_per_hour;
@@ -146,11 +238,15 @@ export class EnergyOptimizerService {
         request.battery
           .max_charge_kwh_per_hour;
 
-      if (!constraint.can_discharge) {
+      if (
+        !constraint.can_discharge
+      ) {
         minimumBatteryMove = 0;
       }
 
-      if (!constraint.can_charge) {
+      if (
+        !constraint.can_charge
+      ) {
         maximumBatteryMove = 0;
       }
 
@@ -158,7 +254,12 @@ export class EnergyOptimizerService {
         `${minimumBatteryMove} <= b${h} <= ${maximumBatteryMove}`,
       );
 
-      // Battery energy bounds
+      /*
+       * Battery energy bounds.
+       *
+       * minimum_battery_kwh already
+       * contains any directive reserve.
+       */
       bounds.push(
         `${constraint.minimum_battery_kwh} <= e${h} <= ${request.battery.capacity_kwh}`,
       );
@@ -177,22 +278,46 @@ Bounds
 End
     `.trim();
 
-    const result = highs.solve(lp, {
-      output_flag: false,
-      presolve: 'on',
-    });
+    let result: HighsResult;
 
-    if (result.Status !== 'Optimal') {
+    try {
+      result = highs.solve(
+        lp,
+        {
+          output_flag: false,
+          presolve: 'on',
+        },
+      );
+    } catch {
       throw new Error(
-        `Energy optimization failed: ${result.Status}`,
+        'Solver execution failed',
       );
     }
 
-    const tolerance = 1e-7;
+    if (
+      result.Status !==
+      'Optimal'
+    ) {
+      this.logger.error(
+        'Optimization engine returned a non-optimal result',
+      );
 
-    const hourlyPlan: HourlyPlanDto[] = [];
+      throw new InternalServerErrorException(
+        'Energy optimization failed',
+      );
+    }
 
-    for (let h = 0; h < 24; h++) {
+    const tolerance =
+      1e-7;
+
+    const hourlyPlan:
+      HourlyPlanDto[] = [];
+
+    for (
+      let h = 0;
+      h < 24;
+      h++
+    ) {
       const grid =
         this.getVariableValue(
           result,
@@ -222,19 +347,33 @@ End
         | 'discharge'
         | 'idle';
 
-      let batteryKwh: number;
+      let batteryKwh:
+        number;
 
-      if (batteryMove > tolerance) {
-        batteryAction = 'charge';
-        batteryKwh = batteryMove;
-      } else if (
-        batteryMove < -tolerance
+      if (
+        batteryMove >
+        tolerance
       ) {
-        batteryAction = 'discharge';
+        batteryAction =
+          'charge';
+
         batteryKwh =
-          Math.abs(batteryMove);
+          batteryMove;
+      } else if (
+        batteryMove <
+        -tolerance
+      ) {
+        batteryAction =
+          'discharge';
+
+        batteryKwh =
+          Math.abs(
+            batteryMove,
+          );
       } else {
-        batteryAction = 'idle';
+        batteryAction =
+          'idle';
+
         batteryKwh = 0;
       }
 
@@ -242,10 +381,14 @@ End
         hour: h,
 
         grid_kwh:
-          this.cleanNumber(grid),
+          this.cleanNumber(
+            grid,
+          ),
 
         solar_used_kwh:
-          this.cleanNumber(solar),
+          this.cleanNumber(
+            solar,
+          ),
 
         battery_action:
           batteryAction,
@@ -265,8 +408,12 @@ End
     const totalGrid =
       this.cleanNumber(
         hourlyPlan.reduce(
-          (sum, item) =>
-            sum + item.grid_kwh,
+          (
+            sum,
+            hour,
+          ) =>
+            sum +
+            hour.grid_kwh,
           0,
         ),
       );
@@ -274,22 +421,26 @@ End
     const totalCost =
       this.cleanNumber(
         hourlyPlan.reduce(
-          (sum, item) => {
-            const hour =
+          (
+            sum,
+            planHour,
+          ) => {
+            const inputHour =
               hoursByNumber.get(
-                item.hour,
+                planHour.hour,
               );
 
-            if (!hour) {
+            if (!inputHour) {
               throw new Error(
-                `Missing tariff for hour ${item.hour}`,
+                'Missing tariff input',
               );
             }
 
             return (
               sum +
-              item.grid_kwh *
-                hour.tariff_bdt_per_kwh
+              planHour.grid_kwh *
+                inputHour
+                  .tariff_bdt_per_kwh
             );
           },
           0,
@@ -300,8 +451,8 @@ End
       this.cleanNumber(
         Math.max(
           ...hourlyPlan.map(
-            (item) =>
-              item.grid_kwh,
+            (hour) =>
+              hour.grid_kwh,
           ),
         ),
       );
@@ -326,21 +477,49 @@ End
     variableName: string,
   ): number {
     const variable =
-      result.Columns[variableName];
+      result.Columns[
+        variableName
+      ];
 
     if (!variable) {
       throw new Error(
-        `Optimizer variable not found: ${variableName}`,
+        'Optimizer variable missing',
       );
     }
 
-    return variable.Primal;
+    const value =
+      variable.Primal;
+
+    if (
+      !Number.isFinite(
+        value,
+      )
+    ) {
+      throw new Error(
+        'Optimizer returned non-finite value',
+      );
+    }
+
+    return value;
   }
 
   private cleanNumber(
     value: number,
   ): number {
-    if (Math.abs(value) < 1e-7) {
+    if (
+      !Number.isFinite(
+        value,
+      )
+    ) {
+      throw new Error(
+        'Non-finite optimization value',
+      );
+    }
+
+    if (
+      Math.abs(value) <
+      1e-7
+    ) {
       return 0;
     }
 

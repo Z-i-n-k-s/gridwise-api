@@ -9,7 +9,9 @@ import {
 
 @Injectable()
 export class RequestValidatorService {
-  validate(request: OptimizeEnergyRequestDto): void {
+  validate(
+    request: OptimizeEnergyRequestDto,
+  ): void {
     this.validateScenarioId(request);
     this.validateOperatorNotes(request);
     this.validateHours(request);
@@ -19,7 +21,11 @@ export class RequestValidatorService {
   private validateScenarioId(
     request: OptimizeEnergyRequestDto,
   ): void {
-    if (!request.scenario_id.trim()) {
+    if (
+      typeof request.scenario_id !==
+        'string' ||
+      !request.scenario_id.trim()
+    ) {
       throw new BadRequestException(
         'scenario_id must not be empty',
       );
@@ -29,23 +35,50 @@ export class RequestValidatorService {
   private validateOperatorNotes(
     request: OptimizeEnergyRequestDto,
   ): void {
-    request.operator_notes.forEach((note, index) => {
-      if (!note.trim()) {
-        throw new BadRequestException(
-          `operator_notes[${index}] must not be empty`,
-        );
-      }
-    });
+    if (
+      !Array.isArray(
+        request.operator_notes,
+      ) ||
+      request.operator_notes.length < 1 ||
+      request.operator_notes.length > 3
+    ) {
+      throw new BadRequestException(
+        'operator_notes must contain 1 to 3 notes',
+      );
+    }
+
+    request.operator_notes.forEach(
+      (note, index) => {
+        if (
+          typeof note !== 'string' ||
+          !note.trim()
+        ) {
+          throw new BadRequestException(
+            `operator_notes[${index}] must not be empty`,
+          );
+        }
+      },
+    );
   }
 
   private validateHours(
     request: OptimizeEnergyRequestDto,
   ): void {
+    if (
+      !Array.isArray(request.hours) ||
+      request.hours.length !== 24
+    ) {
+      throw new BadRequestException(
+        'hours must contain exactly 24 entries',
+      );
+    }
+
     const hours = request.hours.map(
       (item) => item.hour,
     );
 
-    const uniqueHours = new Set(hours);
+    const uniqueHours =
+      new Set(hours);
 
     if (uniqueHours.size !== 24) {
       throw new BadRequestException(
@@ -53,9 +86,10 @@ export class RequestValidatorService {
       );
     }
 
-    const sortedHours = [...hours].sort(
-      (a, b) => a - b,
-    );
+    const sortedHours =
+      [...hours].sort(
+        (a, b) => a - b,
+      );
 
     for (let i = 0; i < 24; i++) {
       if (sortedHours[i] !== i) {
@@ -69,7 +103,14 @@ export class RequestValidatorService {
   private validateBattery(
     request: OptimizeEnergyRequestDto,
   ): void {
-    const battery = request.battery;
+    const battery =
+      request.battery;
+
+    if (!battery) {
+      throw new BadRequestException(
+        'battery is required',
+      );
+    }
 
     if (
       battery.initial_energy_kwh >
